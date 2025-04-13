@@ -1,30 +1,93 @@
 import os
-import openai
-import sys
-from langchain_community.document_loaders.blob_loaders.youtube_audio import (
-    YoutubeAudioLoader,
-)
-from langchain_community.document_loaders.generic import GenericLoader
-from langchain_community.document_loaders.parsers.audio import (
-    OpenAIWhisperParser,
-    OpenAIWhisperParserLocal,
-)
+import requests
+from pytube import YouTube
+import subprocess
+from langchain_ollama import ChatOllama
+
+# Step 1: Download audio from YouTube
+def download_youtube_audio(youtube_url, output_path="audio.mp3"):
+    subprocess.run([
+        "yt-dlp",
+        "-x", "--audio-format", "mp3",
+        "-o", output_path,
+        youtube_url
+    ])
+    return output_path
+
+# Step 2: Upload audio to AssemblyAI
+def upload_to_assemblyai(filename, api_key):
+    headers = {'authorization': api_key}
+    with open(filename, 'rb') as f:
+        response = requests.post(
+            'https://api.assemblyai.com/v2/upload',
+            headers=headers,
+            files={'file': f}
+        )
+    return response.json()['upload_url']
+
+# Step 3: Request transcription
+def request_transcription(audio_url, api_key):
+    endpoint = "https://api.assemblyai.com/v2/transcript"
+    json = {"audio_url": audio_url}
+    headers = {"authorization": api_key}
+    response = requests.post(endpoint, json=json, headers=headers)
+    return response.json()['id']
+
+# Step 4: Poll until transcription is complete
+def wait_for_completion(transcript_id, api_key):
+    endpoint = f"https://api.assemblyai.com/v2/transcript/{transcript_id}"
+    headers = {"authorization": api_key}
+    
+    while True:
+        response = requests.get(endpoint, headers=headers).json()
+        if response['status'] == 'completed':
+            return response['text']
+        elif response['status'] == 'error':
+            raise RuntimeError(f"Transcription failed: {response['error']}")
+        else:
+            print("Transcribing...")  # or use time.sleep(3)
+
+# Main function
+def transcribe_youtube_video(youtube_url, api_key):
+    print(f"Youtube URL {youtube_url}")
+    audio_file = download_youtube_audio(youtube_url)
+    print(f"Audio File {audio_file}")
+    audio_url = upload_to_assemblyai(audio_file, api_key)
+    transcript_id = request_transcription(audio_url, api_key)
+    transcript_text = wait_for_completion(transcript_id, api_key)
+    return transcript_text
 
 
-os.environ["OPENAI_API_KEY"] = "none"
-os.environ["LOCAL_API_KEY"] = "true"
+# Example usage
+if __name__ == "__main__":
 
-model_name = os.environ.get("OLLAMA_MODEL", "ollama/llama2")
-base_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+    youtube_url = "https://www.youtube.com/watch?v=D6xkbGLQesk"
+    assemblyai_api_key = os.getenv("ASSEMBLYAI_API_KEY")
 
-llm = LLM(model=model_name, base_url=base_url)
+    if not assemblyai_api_key:
+        raise ValueError("Please set your ASSEMBLYAI_API_KEY environment variable.")
 
+    # Step 1: Transcribe the YouTube video
+    text = transcribe_youtube_video(youtube_url, assemblyai_api_key)
 
-local = False
+    # Step 2: Initialize local LLM (Ollama)
+    llm = ChatOllama(model="llama3.2", base_url="http://localhost:11434")
 
+    # Step 3: Start chat loop
+    print("\n✅ Transcript ready. You can now ask questions about the video.")
+    print("Type 'exit' to quit.\n")
 
-#Big O Lecture
-urls = ["https://youtu.be/D6xkbGLQesk?si=IeWLgzyNF2kJni40"]
+    while True:
+        user_input = input("You: ")
+        if user_input.lower() in ["exit", "quit"]:
+            break
 
-# Directory to save audio files
-save_dir = "~/Downloads/YouTube"
+        prompt = f"""This is a transcript from a YouTube video:
+
+{text[:2000]}  # trim if too long
+
+User's question: {user_input}
+Answer:"""
+
+        response = llm.invoke(prompt)
+        print("\nLLM:", response.content)
